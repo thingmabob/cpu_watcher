@@ -79,47 +79,48 @@ ask_install() {
 }
 
 check_deps() {
-    local missing_required=()
-    local missing_optional=()
+    missing_required=()   # Removed local scoping
+    missing_optional=()
+    declare -A dep_status
 
     # --- lm-sensors (required) ---
-    if ! command -v sensors >/dev/null 2>&1; then
-        log "⚠️ Missing: sensors (from lm-sensors)"
-        ask_install "lm-sensors" "sensors"
-        if ! command -v sensors >/dev/null 2>&1; then
-            missing_required+=("sensors")
-        else
-            log "✅ Installed & found: sensors"
-        fi
+    if command -v sensors >/dev/null 2>&1; then
+        dep_status["sensors"]="✅"
     else
-        log "✅ Found: sensors"
+        ask_install "lm-sensors" "sensors"
+        if command -v sensors >/dev/null 2>&1; then
+            dep_status["sensors"]="✅"
+        else
+            dep_status["sensors"]="❌"
+            missing_required+=("sensors")
+        fi
     fi
 
     # --- bc (required) ---
-    if ! command -v bc >/dev/null 2>&1; then
-        log "⚠️ Missing: bc"
-        ask_install "bc" "bc"
-        if ! command -v bc >/dev/null 2>&1; then
-            missing_required+=("bc")
-        else
-            log "✅ Installed & found: bc"
-        fi
+    if command -v bc >/dev/null 2>&1; then
+        dep_status["bc"]="✅"
     else
-        log "✅ Found: bc"
+        ask_install "bc" "bc"
+        if command -v bc >/dev/null 2>&1; then
+            dep_status["bc"]="✅"
+        else
+            dep_status["bc"]="❌"
+            missing_required+=("bc")
+        fi
     fi
 
     # --- notify-send (optional) ---
     if command -v notify-send >/dev/null 2>&1; then
         HAVE_NOTIFY_SEND=true
-        log "✅ Found: notify-send (desktop alerts enabled)"
+        dep_status["notify-send"]="✅"
     else
         HAVE_NOTIFY_SEND=false
-        log "⚠️ Missing: notify-send → desktop alerts disabled"
         ask_install "libnotify" "notify-send"
         if command -v notify-send >/dev/null 2>&1; then
             HAVE_NOTIFY_SEND=true
-            log "✅ Installed & found: notify-send"
+            dep_status["notify-send"]="✅"
         else
+            dep_status["notify-send"]="⚠️"
             missing_optional+=("notify-send")
         fi
     fi
@@ -127,20 +128,32 @@ check_deps() {
     # --- pidstat (optional) ---
     if command -v pidstat >/dev/null 2>&1; then
         HAVE_PIDSTAT=true
-        log "✅ Found: pidstat (culprit logging enabled)"
+        dep_status["pidstat"]="✅"
     else
         HAVE_PIDSTAT=false
-        log "⚠️ Missing: pidstat (from sysstat)"
         ask_install "sysstat" "pidstat"
         if command -v pidstat >/dev/null 2>&1; then
             HAVE_PIDSTAT=true
-            log "✅ Installed & found: pidstat (culprit logging enabled)"
+            dep_status["pidstat"]="✅"
         else
+            dep_status["pidstat"]="⚠️"
             missing_optional+=("pidstat")
         fi
     fi
 
     # --- Summary ---
+    echo
+    echo "Dependency Summary:"
+    printf "%-15s %-10s %-10s\n" "Package/Binary" "Critical?" "Status"
+    printf "%-15s %-10s %-10s\n" "---------------" "--------" "------"
+
+    printf "%-15s %-10s %-10s\n" "sensors" "Yes" "${dep_status["sensors"]}"
+    printf "%-15s %-10s %-10s\n" "bc" "Yes" "${dep_status["bc"]}"
+    printf "%-15s %-10s %-10s\n" "notify-send" "No" "${dep_status["notify-send"]}"
+    printf "%-15s %-10s %-10s\n" "pidstat" "No" "${dep_status["pidstat"]}"
+    echo
+
+    # --- Warnings ---
     if [[ ${#missing_required[@]} -gt 0 ]]; then
         log "❌ Missing required packages: ${missing_required[*]}. Watcher may fail."
     fi
@@ -270,11 +283,27 @@ run_watcher() {
 
 ### SERVICE MANAGEMENT ###
 install_service() {
+    # Check dependencies first
+    echo
+    echo "Checking dependencies before installation..."
+    check_deps
+
+    # Abort if required dependencies are missing
+    if [[ ${#missing_required[@]} -gt 0 ]]; then
+        echo "❌ Cannot install service. Missing required dependencies: ${missing_required[*]}"
+        echo "Please install them manually and rerun --install."
+        return 1
+    fi
+
+    # # --- Prepare service folder ---
     mkdir -p "$(dirname "$SERVICE_PATH")"
     mkdir -p "$HOME/.local/bin"
+
+    # --- Copy script to local bin ---
     cp "$0" "$HOME/.local/bin/cpu-watcher.sh"
     chmod +x "$HOME/.local/bin/cpu-watcher.sh"
 
+    # --- Write systemd user service ---
     cat > "$SERVICE_PATH" <<EOF
 [Unit]
 Description=Minimal CPU Temperature & Usage Watcher
@@ -291,10 +320,17 @@ StandardError=journal
 WantedBy=default.target
 EOF
 
+    # --- Reload systemd, enable & start service ---
     systemctl --user daemon-reload
     systemctl --user enable --now "$SERVICE_NAME"
 
     echo "✅ Installed and started $SERVICE_NAME"
+
+    # --- First-time notification if notify-send available ---
+    if [[ "$HAVE_NOTIFY_SEND" == true ]]; then
+        notify-send -u normal "CPU Watcher Installed" \
+                    "✅ CPU Watcher has been installed and is running as a user service."
+    fi
 }
 
 uninstall_service() {
